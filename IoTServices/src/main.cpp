@@ -85,12 +85,12 @@ void measureSHT() {
 
 void httpRequest() {
   Serial.println("Attempting request at: " + timeClient.getFormattedTime());
-  String endpoint = "/api/Device/" + deviceSerialNumber;
+  String endpoint = "/api/v2/Device/" + deviceSerialNumber;
   String contentType = "application/json";
   JsonDocument jsonDocTemp;
   String jsonTemp;
-  //String jsonTemp = "{\"name\":shtc_temp, \"measurementType\":Temperature, \"unit\":C, \"latestReading\":" + String(temp) +"}";
-  jsonDocTemp["name"] = "shtc_temp";
+  //String jsonTemp = "{\"name\":shtc3, \"measurementType\":Temperature, \"unit\":C, \"latestReading\":" + String(temp) +"}";
+  jsonDocTemp["name"] = "shtc3";
   jsonDocTemp["measurementType"] = "Temperature";
   jsonDocTemp["unit"] = "C";
   jsonDocTemp["latestReading"] = String(temp);
