@@ -1,0 +1,16 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"name": "AzureIoTHub",
+			"path": "AzureIoTHub"
+		},
+		{
+			"name": "IoTServices",
+			"path": "IoTServices"
+		}
+	],
+	"settings": {}
+}
