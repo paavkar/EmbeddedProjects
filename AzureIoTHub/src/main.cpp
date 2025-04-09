@@ -17,6 +17,7 @@
 #include <time.h>
 // Logging
 #include "SerialLogger.h"
+#include <FlashStorage.h>
 
 Adafruit_SHTC3 shtc3 = Adafruit_SHTC3();
 WiFiClient wifi;
@@ -81,6 +82,30 @@ static unsigned long getTime();
 static String getFormattedDateTime(unsigned long epochTimeInSeconds);
 static String mqttErrorCodeName(int errorCode);
 
+struct WiFiCredentials {
+  byte valid;
+  char ssid[33];
+  char password[65];
+};
+
+WiFiCredentials creds;
+WiFiServer server(80);
+FlashStorage(wifi_storage, WiFiCredentials);
+
+bool loadCredentials(WiFiCredentials &creds);
+bool saveCredentials(const WiFiCredentials &creds);
+void clearCredentials();
+void startConfigPortal();
+void handleClient();
+
+void restartBoard() {
+  #if defined(ARDUINO_ARCH_SAM) || defined(ARDUINO_ARCH_SAMD) || defined(ARDUINO_ARCH_STM32)
+    NVIC_SystemReset();
+  #else
+    while(1);
+  #endif
+}
+
 #define EXIT_LOOP(condition, errorMessage) \
   do \ 
   { \
@@ -103,49 +128,170 @@ void setup() {
     while (1) delay(1);
   }
   Serial.println("Found SHTC3 sensor");
-  
-  connectToWiFi(); 
-  initializeAzureIoTHubClient();
-  initializeMQTTClient();
-  connectMQTTClientToAzureIoTHub();
+
+  if (loadCredentials(creds) && creds.valid == 1) {    
+    connectToWiFi(); 
+    unsigned long startTime = millis();
+    const unsigned long timeout = 20000;
+
+    while (WiFi.status() != WL_CONNECTED && millis() - startTime < timeout) {
+      delay(500);
+      Serial.print(".");
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+      initializeAzureIoTHubClient();
+      initializeMQTTClient();
+      connectMQTTClientToAzureIoTHub();
+    } else {
+      startConfigPortal();
+    }
+  } else {
+    startConfigPortal();
+  }
 }
 
 void loop() {
-  timeClient.update();
-  if (WiFi.status() != WL_CONNECTED) 
-  {
-    connectToWiFi();
-  }
-
-  int currentMinute = timeClient.getMinutes();
-  if ((currentMinute % readingFrequencyInMinutes == 0) && (currentMinute != lastRequestMinute))
-  {
-    measureSHT();
-    if (!mqttClient.connected()) 
+  if (WiFi.status() != WL_CONNECTED) {
+    handleClient();
+  } else {
+    timeClient.update();
+    if (WiFi.status() != WL_CONNECTED) 
     {
-      connectMQTTClientToAzureIoTHub();
+      connectToWiFi();
     }
 
-    sendTelemetry();
-    
-    lastRequestMinute = currentMinute;
+    int currentMinute = timeClient.getMinutes();
+    if ((currentMinute % readingFrequencyInMinutes == 0) && (currentMinute != lastRequestMinute))
+    {
+      measureSHT();
+      if (!mqttClient.connected()) 
+      {
+        connectMQTTClientToAzureIoTHub();
+      }
+
+      sendTelemetry();
+      
+      lastRequestMinute = currentMinute;
+    }
+
+    mqttClient.poll();
+    delay(50);
   }
+}
 
-  // if (mqttClient.available())
-  // {
-  //   String payload = mqttClient.readString();
-  //   processCommand(payload);
-  // }
+bool loadCredentials(WiFiCredentials &creds) {
+  creds = wifi_storage.read();
+  return true;
+}
 
-  mqttClient.poll();
-  delay(50);
+bool saveCredentials(const WiFiCredentials &creds) {
+  wifi_storage.write(creds);
+  return true;
+}
+
+void clearCredentials() {
+  creds.valid = 0;
+  memset(creds.ssid, 0, sizeof(creds.ssid));
+  memset(creds.password, 0, sizeof(creds.password));
+  wifi_storage.write(creds);
+  Serial.println("Credentials cleared.");
+}
+
+
+void startConfigPortal() {
+  const char* apSSID = "Nano 33 IoT WiFi Config";
+  const char* apPassword = "admin123";
+  Logger.Info("Starting Access Point for configuration...");
+
+  int apStatus = WiFi.beginAP(apSSID, apPassword);
+  if (apStatus != WL_AP_LISTENING) {
+    Logger.Info("Failed to start AP mode!");
+    return;
+  }
+  Logger.Info("AP started with SSID: " + String(apSSID));
+  Logger.Info("AP IP address: " + String(WiFi.localIP()));
+  
+  server.begin();
+}
+
+void handleClient() {
+  WiFiClient client = server.available();
+  if (!client)
+    return;
+
+  Logger.Info("Client connected.");
+  while (!client.available()) {
+    delay(1);
+  }
+  String request = client.readStringUntil('\r');
+  Logger.Info("Request: " + request);
+  Logger.Info(request);
+
+  if (request.startsWith("POST /save")) {
+    String body = "";  
+    while (client.available()) {
+        char c = client.read();
+        body += c;
+    }
+    int ssidIndex = body.indexOf("ssid=");
+    int pwdIndex = body.indexOf("password=");
+    if (ssidIndex >= 0 && pwdIndex >= 0) {
+      int ampIndex = body.indexOf('&');
+      String ssid = body.substring(ssidIndex + 5, ampIndex);
+      String password = body.substring(pwdIndex + 9);
+      
+      ssid.trim();
+      password.trim();
+      
+      Logger.Info("Received SSID: " + ssid);
+      Logger.Info("Received Password: " + password);
+      
+      creds.valid = 1;
+      ssid.toCharArray(creds.ssid, sizeof(creds.ssid));
+      password.toCharArray(creds.password, sizeof(creds.password));
+      
+      saveCredentials(creds);
+      
+      // Respond to the client.
+      client.println("HTTP/1.1 200 OK");
+      client.println("Content-Type: text/html;");
+      client.println("Connection: close");
+      client.println();
+      client.println("<html><body><h2>Credentials Saved. Restarting...</h2></body></html>");
+      delay(2000);
+      restartBoard();
+    }
+  } else {
+    // If not a POST, serve the HTML form.
+    client.println("HTTP/1.1 200 OK");
+    client.println("Content-Type: text/html; charset=UTF-8");
+    client.println("Connection: close");
+    client.println();
+    client.println("<!DOCTYPE HTML>");
+    client.println("<html>");
+    client.println("<head><title>WiFi Configuration</title></head>");
+    client.println("<body align=\"center\">");
+    client.println("<h2>Enter WiFi Credentials</h2>");
+    client.println("<form method='POST' action='/save'>");
+    client.println("SSID: <input type='text' name='ssid'><br>");
+    client.println("Password: <input type='password' name='password'><br>");
+    client.println("<input type='submit' value='Save'>");
+    client.println("</form>");
+    client.println("</form>");
+    client.println("</body>");
+    client.println("</html>");
+  }
+  delay(1);
+  Logger.Info("Client disconnected.");
+  client.stop();
 }
 
 void connectToWiFi() 
 {
   Logger.Info("Attempting to connect to WIFI SSID: " + String(IOT_CONFIG_WIFI_SSID));
 
-  WiFi.begin(IOT_CONFIG_WIFI_SSID, IOT_CONFIG_WIFI_PASSWORD);
+  WiFi.begin(creds.ssid, creds.password);
   while (WiFi.status() != WL_CONNECTED) 
   {
     Serial.print(".");
@@ -165,29 +311,13 @@ void connectToWiFi()
     Serial.print(".");
     delay(500);
     if (millis() - start > 30000) {
-      Serial.println("\nTime update timeout. Check your NTP configuration or network.");
+      Logger.Info("\nTime update timeout. Check your NTP configuration or network.");
       break;
     }
   }
   Serial.println();
 
   Logger.Info("Time synced!");
-}
-
-void processCommand(String &payload) {
-  Serial.print("Received C2D command: ");
-  Serial.println(payload);
-
-  // Example processing logic:
-  if (payload.equals("TURN_ON")) {
-    Serial.println("Executing command: TURN ON");
-    // Insert code to turn on an LED or actuator here.
-  } else if (payload.equals("TURN_OFF")) {
-    Serial.println("Executing command: TURN OFF");
-    // Insert code to turn off an LED or actuator here.
-  } else {
-    Serial.println("Unknown command received.");
-  }
 }
 
 void initializeAzureIoTHubClient() {
@@ -258,6 +388,8 @@ void onMessageReceived(int messageSize)
   while (mqttClient.available()) 
   {
     Serial.print((char)mqttClient.read());
+    String payload = mqttClient.readString();
+    Serial.println(payload);
   }
   Serial.println();
 }
@@ -268,29 +400,11 @@ static void sendTelemetry()
   unsigned long now = getTime();  // GMT
   unsigned long localNow = now + GMT_OFFSET_SECS;
 
-  Logger.Info("UTC Current time: " + getFormattedDateTime(now) + " (epoch: " + now + " secs)");
+  Logger.Info("UTC Current time: " + getFormattedDateTime(now));
   Logger.Info("Local Current time: " + getFormattedDateTime(localNow));
 
-  uint8_t custom_prop_buffer[256];
-
-  // Create an az_iot_message_properties instance.
-  az_iot_message_properties custom_properties;
-
-  // Initialize the properties instance using the buffer.
-  az_result rc = az_iot_message_properties_init(
-      &custom_properties,
-      AZ_SPAN_FROM_BUFFER(custom_prop_buffer),
-      NULL
-  );
-
-  rc = az_iot_message_properties_append(
-    &custom_properties,
-    AZ_SPAN_FROM_STR("serialNumber"),
-    AZ_SPAN_FROM_STR(IOT_CONFIG_DEVICE_ID)
-  );
-
   int result = az_iot_hub_client_telemetry_get_publish_topic(
-      &azIoTHubClient, &custom_properties, telemetryTopic, sizeof(telemetryTopic), NULL);
+      &azIoTHubClient, NULL, telemetryTopic, sizeof(telemetryTopic), NULL);
   EXIT_LOOP(az_result_failed(result), "Failed to get telemetry publish topic. Return code: " + result);
 
   Serial.println(telemetryTopic);
