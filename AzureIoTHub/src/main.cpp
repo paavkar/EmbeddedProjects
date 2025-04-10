@@ -93,7 +93,7 @@ int time_zone = IOT_CONFIG_TIME_ZONE;
 int daylight_savings = IOT_CONFIG_TIME_ZONE_DAYLIGHT_SAVINGS_DIFF;
 int offset = (time_zone + daylight_savings) * 3600;
 
-int led = 13; 
+int led = 13;
 int button_1 = 2;
 byte state_led = LOW;
 
@@ -127,6 +127,7 @@ static String mqttErrorCodeName(int errorCode);
 // Time functions
 static unsigned long getTime();
 static String getFormattedDateTime(unsigned long epochTimeInSeconds);
+void setTime();
 
 void restartBoard() {
   #if defined(ARDUINO_ARCH_SAM) || defined(ARDUINO_ARCH_SAMD) || defined(ARDUINO_ARCH_STM32)
@@ -167,47 +168,18 @@ void setup() {
   setWiFiMode();
 }
 
-void setWiFiMode() {
-  if (loadCredentials(creds) && creds.valid) {    
-    connectToWiFi();
-    unsigned long startTime = millis();
-    const unsigned long timeout = 20000;
-
-    while (WiFi.status() != WL_CONNECTED && millis() - startTime < timeout) {
-      delay(500);
-    }
-
-    if (WiFi.status() == WL_CONNECTED) {
-      state_led = HIGH;
-      initializeAzureIoTHubClient();
-      initializeMQTTClient();
-      connectMQTTClientToAzureIoTHub();
-    } else {
-      startConfigPortal();
-    }
-  } else {
-    startConfigPortal();
-  }
-}
-
-void resetWiFi() {
-  state_led = LOW;
-  Logger.Info("Resetting WiFi info and entering configuration mode...");
-  clearCredentials();
-  startConfigPortal();
-}
-
 void loop() {
   digitalWrite(led, state_led);
   if (WiFi.status() != WL_CONNECTED) {
     handleClient();
   } else {
-    timeClient.update();
     if (WiFi.status() != WL_CONNECTED) 
     {
+      state_led = LOW;
       connectToWiFi();
     }
 
+    timeClient.update();
     int currentMinute = timeClient.getMinutes();
     if ((currentMinute % readingFrequencyInMinutes == 0) && (currentMinute != lastRequestMinute))
     {
@@ -225,22 +197,36 @@ void loop() {
   }
 }
 
-bool loadCredentials(WiFiCredentials &creds) {
-  creds = wifi_storage.read();
-  return true;
+void onMessageReceived(int messageSize) 
+{
+  while (mqttClient.available()) 
+  {
+    Serial.print((char)mqttClient.read());
+    String payload = mqttClient.readString();
+    Serial.println(payload);
+  }
+  Serial.println();
 }
 
-bool saveCredentials(const WiFiCredentials &creds) {
-  wifi_storage.write(creds);
-  return true;
-}
+void setWiFiMode() {
+  if (loadCredentials(creds) && creds.valid) {    
+    connectToWiFi();
+    unsigned long startTime = millis();
+    const unsigned long timeout = 20000;
 
-void clearCredentials() {
-  creds.valid = 0;
-  memset(creds.ssid, 0, sizeof(creds.ssid));
-  memset(creds.password, 0, sizeof(creds.password));
-  wifi_storage.write(creds);
-  Logger.Info("Credentials cleared.");
+    while (WiFi.status() != WL_CONNECTED && millis() - startTime < timeout) {
+      delay(500);
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+      state_led = HIGH;
+      initializeAzureIoTHubClient();
+      initializeMQTTClient();
+      connectMQTTClientToAzureIoTHub();
+    }
+  } else {
+    startConfigPortal();
+  }
 }
 
 void startConfigPortal() {
@@ -270,41 +256,53 @@ void startConfigPortal() {
   server.begin();
 }
 
-void sortNetworksByRSSI() {
-  for (int i = 0; i < numSsid - 1; i++) {
-    for (int j = 1; j < numSsid; j++) {
-      if (networks[i].RSSI < networks[j].RSSI) {
-        WiFiNetwork temp = networks[i];
-        networks[i] = networks[j];
-        networks[j] = temp;
-      }
-    }
+void connectToWiFi() 
+{
+  Logger.Info("Attempting to connect to WIFI SSID: " + String(creds.ssid));
+
+  WiFi.begin(creds.ssid, creds.password);
+  while (WiFi.status() != WL_CONNECTED) 
+  {
+    Logger.Error("Couldn't connect to " + String(creds.ssid));
+    delay(IOT_CONFIG_WIFI_CONNECT_RETRY_MS);
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    state_led = HIGH;
+    Serial.print("[INFO] WiFi connected, IP address: ");
+    Serial.print(WiFi.localIP());
+    Serial.println(", Strength (dBm): " + WiFi.RSSI());
+    
+    setTime();
   }
 }
 
-char* getEncryptionType(int thisType) {
-  // read the encryption type and return the name:
-  switch (thisType) {
-    case ENC_TYPE_WEP:
-      return "WEP";
+void setTime() {
+  Logger.Info("Syncing time.");
+
+  timeClient.begin();
+  timeClient.update();
+
+  unsigned long start = millis();
+  while (getTime() < 1000000)
+  {
+    Logger.Info("Setting time");
+    timeClient.update();
+    delay(500);
+    if (millis() - start > 30000) {
+      Logger.Error("Time update timeout. Check your NTP configuration or network.");
       break;
-    case ENC_TYPE_TKIP:
-      return "WPA";
-      break;
-    case ENC_TYPE_CCMP:
-      return "WPA2";
-      break;
-    case ENC_TYPE_NONE:
-      return "None";
-      break;
-    case ENC_TYPE_AUTO:
-      return "Auto";
-      break;
-    case ENC_TYPE_UNKNOWN:
-    default:
-      return "Unknown";
-      break;
+    }
   }
+
+  Logger.Info("Time synced!");
+}
+
+void resetWiFi() {
+  state_led = LOW;
+  Logger.Info("Resetting WiFi info and entering configuration mode...");
+  clearCredentials();
+  startConfigPortal();
 }
 
 void handleClient() {
@@ -437,36 +435,59 @@ void handleClient() {
   client.stop();
 }
 
-void connectToWiFi() 
-{
-  Logger.Info("Attempting to connect to WIFI SSID: " + String(creds.ssid));
+bool loadCredentials(WiFiCredentials &creds) {
+  creds = wifi_storage.read();
+  return true;
+}
 
-  WiFi.begin(creds.ssid, creds.password);
-  while (WiFi.status() != WL_CONNECTED) 
-  {
-    Logger.Error("Couldn't connect to " + String(creds.ssid));
-    delay(IOT_CONFIG_WIFI_CONNECT_RETRY_MS);
-  }
+bool saveCredentials(const WiFiCredentials &creds) {
+  wifi_storage.write(creds);
+  return true;
+}
 
-  Serial.print("[INFO] WiFi connected, IP address: ");
-  Serial.print(WiFi.localIP());
-  Serial.println(", Strength (dBm): " + WiFi.RSSI());
-  Logger.Info("Syncing time.");
+void clearCredentials() {
+  creds.valid = 0;
+  memset(creds.ssid, 0, sizeof(creds.ssid));
+  memset(creds.password, 0, sizeof(creds.password));
+  wifi_storage.write(creds);
+  Logger.Info("Credentials cleared.");
+}
 
-  timeClient.begin();
-
-  unsigned long start = millis();
-  while (getTime() < 1000000)
-  {
-    timeClient.update();
-    delay(500);
-    if (millis() - start > 30000) {
-      Logger.Info("\nTime update timeout. Check your NTP configuration or network.");
-      break;
+void sortNetworksByRSSI() {
+  for (int i = 0; i < numSsid - 1; i++) {
+    for (int j = 1; j < numSsid; j++) {
+      if (networks[i].RSSI < networks[j].RSSI) {
+        WiFiNetwork temp = networks[i];
+        networks[i] = networks[j];
+        networks[j] = temp;
+      }
     }
   }
+}
 
-  Logger.Info("Time synced!");
+char* getEncryptionType(int thisType) {
+  // read the encryption type and return the name:
+  switch (thisType) {
+    case ENC_TYPE_WEP:
+      return "WEP";
+      break;
+    case ENC_TYPE_TKIP:
+      return "WPA";
+      break;
+    case ENC_TYPE_CCMP:
+      return "WPA2";
+      break;
+    case ENC_TYPE_NONE:
+      return "None";
+      break;
+    case ENC_TYPE_AUTO:
+      return "Auto";
+      break;
+    case ENC_TYPE_UNKNOWN:
+    default:
+      return "Unknown";
+      break;
+  }
 }
 
 void initializeAzureIoTHubClient() {
@@ -530,17 +551,6 @@ void connectMQTTClientToAzureIoTHub()
   mqttClient.subscribe(AZ_IOT_HUB_CLIENT_C2D_SUBSCRIBE_TOPIC);
 
   Logger.Info("Subscribed to MQTT topic: " + String(AZ_IOT_HUB_CLIENT_C2D_SUBSCRIBE_TOPIC));
-}
-
-void onMessageReceived(int messageSize) 
-{
-  while (mqttClient.available()) 
-  {
-    Serial.print((char)mqttClient.read());
-    String payload = mqttClient.readString();
-    Serial.println(payload);
-  }
-  Serial.println();
 }
 
 static void sendTelemetry() 
