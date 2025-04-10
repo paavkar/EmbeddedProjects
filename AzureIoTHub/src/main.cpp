@@ -42,6 +42,10 @@ char* iot_hub_hostname = IOT_CONFIG_IOTHUB_FQDN;
 int lastRequestMinute = -1;
 int readingFrequencyInMinutes = 5;
 
+#define NUMBER_OF_NETWORKS 20
+#define MAX_SSID_LEN 33
+#define MAX_ENC_LEN 16
+
 #define BUFFER_LENGTH_MQTT_CLIENT_ID 256
 #define BUFFER_LENGTH_MQTT_PASSWORD 256
 #define BUFFER_LENGTH_MQTT_TOPIC 256
@@ -88,18 +92,29 @@ struct WiFiCredentials {
   char password[65];
 };
 
+struct WiFiNetwork {
+  String SSID;
+  String EncryptionType;
+  int32_t RSSI;
+};
+
 WiFiCredentials creds;
 WiFiServer server(80);
 FlashStorage(wifi_storage, WiFiCredentials);
+WiFiNetwork networks[20];
+int numSsid = 0;
 
 bool loadCredentials(WiFiCredentials &creds);
 bool saveCredentials(const WiFiCredentials &creds);
 void clearCredentials();
 void startConfigPortal();
 void handleClient();
+char* getEncryptionType(int thisType);
+void sortNetworksByRSSI();
 
 void restartBoard() {
   #if defined(ARDUINO_ARCH_SAM) || defined(ARDUINO_ARCH_SAMD) || defined(ARDUINO_ARCH_STM32)
+    Logger.Info("Restarting the board...");
     NVIC_SystemReset();
   #else
     while(1);
@@ -129,7 +144,7 @@ void setup() {
   }
   Serial.println("Found SHTC3 sensor");
 
-  if (loadCredentials(creds) && creds.valid == 1) {    
+  if (loadCredentials(creds) && creds.valid) {    
     connectToWiFi(); 
     unsigned long startTime = millis();
     const unsigned long timeout = 20000;
@@ -169,9 +184,7 @@ void loop() {
       {
         connectMQTTClientToAzureIoTHub();
       }
-
       sendTelemetry();
-      
       lastRequestMinute = currentMinute;
     }
 
@@ -195,11 +208,20 @@ void clearCredentials() {
   memset(creds.ssid, 0, sizeof(creds.ssid));
   memset(creds.password, 0, sizeof(creds.password));
   wifi_storage.write(creds);
-  Serial.println("Credentials cleared.");
+  Logger.Info("Credentials cleared.");
 }
 
-
 void startConfigPortal() {
+  numSsid = WiFi.scanNetworks();
+
+  for (int thisNet = 0; thisNet < numSsid; thisNet++) {
+    networks[thisNet].SSID = WiFi.SSID(thisNet);
+    networks[thisNet].RSSI = WiFi.RSSI(thisNet);
+    networks[thisNet].EncryptionType = getEncryptionType(WiFi.encryptionType(thisNet));
+  }
+
+  sortNetworksByRSSI();
+
   const char* apSSID = "Nano 33 IoT WiFi Config";
   const char* apPassword = "admin123";
   Logger.Info("Starting Access Point for configuration...");
@@ -210,9 +232,47 @@ void startConfigPortal() {
     return;
   }
   Logger.Info("AP started with SSID: " + String(apSSID));
-  Logger.Info("AP IP address: " + String(WiFi.localIP()));
+  Serial.print("[INFO] AP IP address: ");
+  Serial.println(WiFi.localIP());
   
   server.begin();
+}
+
+void sortNetworksByRSSI() {
+  for (int i = 0; i < numSsid - 1; i++) {
+    for (int j = 1; j < numSsid; j++) {
+      if (networks[i].RSSI < networks[j].RSSI) {
+        WiFiNetwork temp = networks[i];
+        networks[i] = networks[j];
+        networks[j] = temp;
+      }
+    }
+  }
+}
+
+char* getEncryptionType(int thisType) {
+  // read the encryption type and return the name:
+  switch (thisType) {
+    case ENC_TYPE_WEP:
+      return "WEP";
+      break;
+    case ENC_TYPE_TKIP:
+      return "WPA";
+      break;
+    case ENC_TYPE_CCMP:
+      return "WPA2";
+      break;
+    case ENC_TYPE_NONE:
+      return "None";
+      break;
+    case ENC_TYPE_AUTO:
+      return "Auto";
+      break;
+    case ENC_TYPE_UNKNOWN:
+    default:
+      return "Unknown";
+      break;
+  }
 }
 
 void handleClient() {
@@ -226,14 +286,9 @@ void handleClient() {
   }
   String request = client.readStringUntil('\r');
   Logger.Info("Request: " + request);
-  Logger.Info(request);
 
   if (request.startsWith("POST /save")) {
-    String body = "";  
-    while (client.available()) {
-        char c = client.read();
-        body += c;
-    }
+    String body = client.readString();
     int ssidIndex = body.indexOf("ssid=");
     int pwdIndex = body.indexOf("password=");
     if (ssidIndex >= 0 && pwdIndex >= 0) {
@@ -264,23 +319,87 @@ void handleClient() {
     }
   } else {
     // If not a POST, serve the HTML form.
-    client.println("HTTP/1.1 200 OK");
-    client.println("Content-Type: text/html; charset=UTF-8");
-    client.println("Connection: close");
-    client.println();
     client.println("<!DOCTYPE HTML>");
     client.println("<html>");
-    client.println("<head><title>WiFi Configuration</title></head>");
-    client.println("<body align=\"center\">");
+    client.println("<head>");
+    client.println("<title>WiFi Configuration</title>");
+    client.println("<style>");
+    client.println("body { font-family: Arial, sans-serif; margin: 0; padding: 0; text-align: center; }");
+    client.println(".container { width: 90%; max-width: 800px; margin: auto; }");
+    client.println("h1, h2 { color: #333; }");
+
+    /* Table Styles */
+    client.println("table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }");
+    client.println("th, td { border: 1px solid #ccc; padding: 10px; text-align: left; }");
+    client.println("th { background-color: #f4f4f4; }");
+
+    /* Input Styles */
+    client.println("input[type=text], input[type=password], select { width: 100%; max-width: 400px; padding: 10px; margin: 10px auto; border: 1px solid #ccc; border-radius: 5px; }");
+    client.println("input[type=submit] { background-color: #007BFF; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; }");
+    client.println("input[type=submit]:hover { background-color: #0056b3; }");
+
+    /* Responsive Design */
+    client.println("@media (max-width: 768px) {");
+    client.println("  table { font-size: 14px; }");
+    client.println("  th, td { padding: 8px; }");
+    client.println("  h1, h2 { font-size: 20px; }");
+    client.println("  input[type=text], input[type=password], select { font-size: 16px; width: 100%; }");
+    client.println("  input[type=submit] { font-size: 16px; width: 80%; }");
+    client.println("}");
+    client.println("</style>");
+    client.println("</head>");
+    client.println("<body>");
+    client.println("<div class='container'>");
+
+    /* Display Available Networks */
+    client.println("<h1>Available Networks</h1>");
+    client.println("<table>");
+    client.println("<thead>");
+    client.println("<tr>");
+    client.println("<th>SSID</th>");
+    client.println("<th>RSSI</th>");
+    client.println("<th>Encryption Type</th>");
+    client.println("</tr>");
+    client.println("</thead>");
+    client.println("<tbody>");
+    for (int i = 0; i < numSsid; i++) {
+      client.println("<tr>");
+      client.print("<td>");
+      client.print(networks[i].SSID);
+      client.println("</td>");
+      client.print("<td>");
+      client.print(networks[i].RSSI);
+      client.println("</td>");
+      client.print("<td>");
+      client.print(networks[i].EncryptionType);
+      client.println("</td>");
+      client.println("</tr>");
+    }
+    client.println("</tbody>");
+    client.println("</table>");
+
+    /* WiFi Credentials Form */
     client.println("<h2>Enter WiFi Credentials</h2>");
     client.println("<form method='POST' action='/save'>");
-    client.println("SSID: <input type='text' name='ssid'><br>");
-    client.println("Password: <input type='password' name='password'><br>");
+    client.println("<label for='ssid'>SSID:</label>");
+    client.println("<select id='ssid' name='ssid'>");
+    for (int i = 0; i < numSsid; i++) {
+      client.print("<option value='");
+      client.print(networks[i].SSID);
+      client.print("'>");
+      client.print(networks[i].SSID);
+      client.println("</option>");
+    }
+    client.println("</select><br>");
+    client.println("<label for='password'>Password:</label>");
+    client.println("<input type='password' id='password' name='password'><br>");
     client.println("<input type='submit' value='Save'>");
     client.println("</form>");
-    client.println("</form>");
+
+    client.println("</div>");
     client.println("</body>");
     client.println("</html>");
+
   }
   delay(1);
   Logger.Info("Client disconnected.");
@@ -294,10 +413,8 @@ void connectToWiFi()
   WiFi.begin(creds.ssid, creds.password);
   while (WiFi.status() != WL_CONNECTED) 
   {
-    Serial.print(".");
     delay(IOT_CONFIG_WIFI_CONNECT_RETRY_MS);
   }
-  Serial.println();
 
   Logger.Info("WiFi connected, IP address: " + String(WiFi.localIP()) + ", Strength (dBm): " + WiFi.RSSI());
   Logger.Info("Syncing time.");
@@ -308,7 +425,6 @@ void connectToWiFi()
   while (getTime() < 1000000)
   {
     timeClient.update();
-    Serial.print(".");
     delay(500);
     if (millis() - start > 30000) {
       Logger.Info("\nTime update timeout. Check your NTP configuration or network.");
