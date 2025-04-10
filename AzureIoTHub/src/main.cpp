@@ -19,29 +19,6 @@
 #include "SerialLogger.h"
 #include <FlashStorage.h>
 
-Adafruit_SHTC3 shtc3 = Adafruit_SHTC3();
-WiFiClient wifi;
-BearSSLClient bearSSLClient(wifi);
-MqttClient mqttClient(bearSSLClient);
-az_iot_hub_client azIoTHubClient;
-
-WiFiUDP ntpUDP;
-int time_zone = IOT_CONFIG_TIME_ZONE;
-int daylight_savings = IOT_CONFIG_TIME_ZONE_DAYLIGHT_SAVINGS_DIFF;
-int offset = (time_zone + daylight_savings) * 3600;
-NTPClient timeClient(ntpUDP, "pool.ntp.org", 0, 60000);
-
-char mqtt_username[128];
-char mqtt_publish_topic[128];
-char mqtt_subscribe_topic[128];
-float temp, humidity;
-int status = WL_IDLE_STATUS;
-unsigned long lastConnectionTime = 0;
-char* device_serial_number = IOT_CONFIG_DEVICE_ID;
-char* iot_hub_hostname = IOT_CONFIG_IOTHUB_FQDN;
-int lastRequestMinute = -1;
-int readingFrequencyInMinutes = 5;
-
 #define NUMBER_OF_NETWORKS 20
 #define MAX_SSID_LEN 33
 #define MAX_ENC_LEN 16
@@ -59,51 +36,69 @@ int readingFrequencyInMinutes = 5;
 #define GMT_OFFSET_SECS (IOT_CONFIG_DAYLIGHT_SAVINGS ? \
                         ((IOT_CONFIG_TIME_ZONE + IOT_CONFIG_TIME_ZONE_DAYLIGHT_SAVINGS_DIFF) * SECS_PER_HOUR) : \
                         (IOT_CONFIG_TIME_ZONE * SECS_PER_HOUR))
-static char mqttClientId[BUFFER_LENGTH_MQTT_CLIENT_ID];
-static char mqttUsername[BUFFER_LENGTH_MQTT_USERNAME];
-static char mqttPassword[BUFFER_LENGTH_MQTT_PASSWORD];
 
-static char telemetryTopic[BUFFER_LENGTH_MQTT_TOPIC];
-
-void connectToWiFi();
-void measureSHT();
-
-void initializeAzureIoTHubClient();
-void initializeMQTTClient();
-void connectMQTTClientToAzureIoTHub();
-
-void onMessageReceived(int messageSize);
-static void sendTelemetry();
-
-static void generateMQTTPassword();
-static void generateSASBase64EncodedSignedSignature(
-    uint8_t const* sasSignature, size_t const sasSignatureSize,
-    uint8_t* encodedSignedSignature, size_t encodedSignedSignatureSize,
-    size_t* encodedSignedSignatureLength);
-static uint64_t getSASTokenExpirationTime(uint32_t minutes);
-
-static unsigned long getTime();
-static String getFormattedDateTime(unsigned long epochTimeInSeconds);
-static String mqttErrorCodeName(int errorCode);
-
+// Data type for saving WiFi network credentials
 struct WiFiCredentials {
   byte valid;
   char ssid[33];
   char password[65];
 };
 
+// Data type for WiFi network information
 struct WiFiNetwork {
   String SSID;
   String EncryptionType;
   int32_t RSSI;
 };
 
+// WiFi and time client
+WiFiClient wifi;
+BearSSLClient bearSSLClient(wifi);
 WiFiCredentials creds;
 WiFiServer server(80);
-FlashStorage(wifi_storage, WiFiCredentials);
 WiFiNetwork networks[20];
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, "pool.ntp.org", 0, 60000);
+FlashStorage(wifi_storage, WiFiCredentials);
 int numSsid = 0;
+int status = WL_IDLE_STATUS;
 
+// Azure IoT Hub
+static char telemetryTopic[BUFFER_LENGTH_MQTT_TOPIC];
+az_iot_hub_client azIoTHubClient;
+MqttClient mqttClient(bearSSLClient);
+
+// Sensors
+Adafruit_SHTC3 shtc3 = Adafruit_SHTC3();
+
+// MQTT
+static char mqttClientId[BUFFER_LENGTH_MQTT_CLIENT_ID];
+static char mqttUsername[BUFFER_LENGTH_MQTT_USERNAME];
+static char mqttPassword[BUFFER_LENGTH_MQTT_PASSWORD];
+char mqtt_username[128];
+char mqtt_publish_topic[128];
+char mqtt_subscribe_topic[128];
+
+// Sensor readings
+float temp, humidity;
+
+char* device_serial_number = IOT_CONFIG_DEVICE_ID;
+
+// Sensor measurement frequency
+int lastRequestMinute = -1;
+int readingFrequencyInMinutes = 5;
+
+// Timezone information
+int time_zone = IOT_CONFIG_TIME_ZONE;
+int daylight_savings = IOT_CONFIG_TIME_ZONE_DAYLIGHT_SAVINGS_DIFF;
+int offset = (time_zone + daylight_savings) * 3600;
+
+int led = 13; 
+int button_1 = 2;
+byte state_led = LOW;
+
+// WiFi functions
+void connectToWiFi();
 bool loadCredentials(WiFiCredentials &creds);
 bool saveCredentials(const WiFiCredentials &creds);
 void clearCredentials();
@@ -111,6 +106,27 @@ void startConfigPortal();
 void handleClient();
 char* getEncryptionType(int thisType);
 void sortNetworksByRSSI();
+void setWiFiMode();
+void resetWiFi();
+
+// Azure IoT Hub, MQTT, and measurement functions
+void initializeAzureIoTHubClient();
+void initializeMQTTClient();
+void connectMQTTClientToAzureIoTHub();
+void onMessageReceived(int messageSize);
+void measureSHT();
+static void sendTelemetry();
+static void generateMQTTPassword();
+static void generateSASBase64EncodedSignedSignature(
+    uint8_t const* sasSignature, size_t const sasSignatureSize,
+    uint8_t* encodedSignedSignature, size_t encodedSignedSignatureSize,
+    size_t* encodedSignedSignatureLength);
+static uint64_t getSASTokenExpirationTime(uint32_t minutes);
+static String mqttErrorCodeName(int errorCode);
+
+// Time functions
+static unsigned long getTime();
+static String getFormattedDateTime(unsigned long epochTimeInSeconds);
 
 void restartBoard() {
   #if defined(ARDUINO_ARCH_SAM) || defined(ARDUINO_ARCH_SAMD) || defined(ARDUINO_ARCH_STM32)
@@ -130,31 +146,39 @@ void restartBoard() {
     } \
   } while (0)
   
-
 void setup() {
   Serial.begin(9600);
 
   while (!Serial)
     delay(10);
 
-  Serial.println("SHTC3 test");
   if (! shtc3.begin()) {
-    Serial.println("Couldn't find SHTC3");
+    Logger.Info("Couldn't find SHTC3");
     while (1) delay(1);
   }
-  Serial.println("Found SHTC3 sensor");
+  Logger.Info("Found SHTC3 sensor");
 
+  pinMode(led, OUTPUT);
+  pinMode(button_1, INPUT);
+  digitalWrite(led, state_led);
+
+  attachInterrupt(digitalPinToInterrupt(button_1), resetWiFi, FALLING);
+
+  setWiFiMode();
+}
+
+void setWiFiMode() {
   if (loadCredentials(creds) && creds.valid) {    
-    connectToWiFi(); 
+    connectToWiFi();
     unsigned long startTime = millis();
     const unsigned long timeout = 20000;
 
     while (WiFi.status() != WL_CONNECTED && millis() - startTime < timeout) {
       delay(500);
-      Serial.print(".");
     }
 
     if (WiFi.status() == WL_CONNECTED) {
+      state_led = HIGH;
       initializeAzureIoTHubClient();
       initializeMQTTClient();
       connectMQTTClientToAzureIoTHub();
@@ -166,7 +190,15 @@ void setup() {
   }
 }
 
+void resetWiFi() {
+  state_led = LOW;
+  Logger.Info("Resetting WiFi info and entering configuration mode...");
+  clearCredentials();
+  startConfigPortal();
+}
+
 void loop() {
+  digitalWrite(led, state_led);
   if (WiFi.status() != WL_CONNECTED) {
     handleClient();
   } else {
@@ -399,7 +431,6 @@ void handleClient() {
     client.println("</div>");
     client.println("</body>");
     client.println("</html>");
-
   }
   delay(1);
   Logger.Info("Client disconnected.");
@@ -408,15 +439,18 @@ void handleClient() {
 
 void connectToWiFi() 
 {
-  Logger.Info("Attempting to connect to WIFI SSID: " + String(IOT_CONFIG_WIFI_SSID));
+  Logger.Info("Attempting to connect to WIFI SSID: " + String(creds.ssid));
 
   WiFi.begin(creds.ssid, creds.password);
   while (WiFi.status() != WL_CONNECTED) 
   {
+    Logger.Error("Couldn't connect to " + String(creds.ssid));
     delay(IOT_CONFIG_WIFI_CONNECT_RETRY_MS);
   }
 
-  Logger.Info("WiFi connected, IP address: " + String(WiFi.localIP()) + ", Strength (dBm): " + WiFi.RSSI());
+  Serial.print("[INFO] WiFi connected, IP address: ");
+  Serial.print(WiFi.localIP());
+  Serial.println(", Strength (dBm): " + WiFi.RSSI());
   Logger.Info("Syncing time.");
 
   timeClient.begin();
@@ -431,7 +465,6 @@ void connectToWiFi()
       break;
     }
   }
-  Serial.println();
 
   Logger.Info("Time synced!");
 }
@@ -523,7 +556,6 @@ static void sendTelemetry()
       &azIoTHubClient, NULL, telemetryTopic, sizeof(telemetryTopic), NULL);
   EXIT_LOOP(az_result_failed(result), "Failed to get telemetry publish topic. Return code: " + result);
 
-  Serial.println(telemetryTopic);
   String topicStr = String(telemetryTopic);
 
   JsonDocument jsonDoc;
