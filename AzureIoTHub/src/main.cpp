@@ -82,7 +82,7 @@ char mqtt_subscribe_topic[128];
 // Sensor readings
 float temp, humidity;
 
-char* device_serial_number = IOT_CONFIG_DEVICE_ID;
+String device_serial_number = IOT_CONFIG_DEVICE_ID;
 
 // Sensor measurement frequency
 int lastRequestMinute = -1;
@@ -104,7 +104,7 @@ bool saveCredentials(const WiFiCredentials &creds);
 void clearCredentials();
 void startConfigPortal();
 void handleClient();
-char* getEncryptionType(int thisType);
+String getEncryptionType(int thisType);
 void sortNetworksByRSSI();
 void setWiFiMode();
 void resetWiFi();
@@ -465,27 +465,27 @@ void sortNetworksByRSSI() {
   }
 }
 
-char* getEncryptionType(int thisType) {
+String getEncryptionType(int thisType) {
   // read the encryption type and return the name:
   switch (thisType) {
     case ENC_TYPE_WEP:
-      return "WEP";
+      return String("WEP");
       break;
     case ENC_TYPE_TKIP:
-      return "WPA";
+      return String("WPA");
       break;
     case ENC_TYPE_CCMP:
-      return "WPA2";
+      return String("WPA2");
       break;
     case ENC_TYPE_NONE:
-      return "None";
+      return String("None");
       break;
     case ENC_TYPE_AUTO:
-      return "Auto";
+      return String("Auto");
       break;
     case ENC_TYPE_UNKNOWN:
     default:
-      return "Unknown";
+      return String("Unknown");
       break;
   }
 }
@@ -555,7 +555,7 @@ void connectMQTTClientToAzureIoTHub()
 
 static void sendTelemetry() 
 {
-  Logger.Info("Arduino Nano 33 IoT sending telemetry . . . ");
+  Logger.Info("Arduino Nano 33 IoT sending telemetry...");
   unsigned long now = getTime();  // GMT
   unsigned long localNow = now + GMT_OFFSET_SECS;
 
@@ -566,17 +566,16 @@ static void sendTelemetry()
       &azIoTHubClient, NULL, telemetryTopic, sizeof(telemetryTopic), NULL);
   EXIT_LOOP(az_result_failed(result), "Failed to get telemetry publish topic. Return code: " + result);
 
-  String topicStr = String(telemetryTopic);
-
   JsonDocument jsonDoc;
   jsonDoc["serialNumber"] = device_serial_number;
   jsonDoc["name"] = "shtc3";
 
-  JsonArray readings = jsonDoc.createNestedArray("readings");
-  JsonObject tempReading = readings.createNestedObject();
-  tempReading["measurementType"] = "Temperature";
-  tempReading["unit"] = "C";
-  tempReading["latestReading"] = String(temp);
+  JsonArray readings = jsonDoc["readings"].to<JsonArray>();
+  JsonDocument sensorReading;
+  sensorReading["measurementType"] = "Temperature";
+  sensorReading["unit"] = "C";
+  sensorReading["latestReading"] = String(temp);
+  readings.add(sensorReading);
 
   String jsonPayload;
   serializeJsonPretty(jsonDoc, jsonPayload);
@@ -586,14 +585,12 @@ static void sendTelemetry()
   mqttClient.endMessage();
 
   delay(500);
-  
-  jsonDoc.remove("readings");
-  readings = jsonDoc.createNestedArray("readings");
 
-  JsonObject humidityReading = readings.createNestedObject();
-  humidityReading["measurementType"] = "Humidity";
-  humidityReading["unit"] = "% rH";
-  humidityReading["latestReading"] = String(humidity);
+  readings.clear();
+  sensorReading["measurementType"] = "Humidity";
+  sensorReading["unit"] = "% rH";
+  sensorReading["latestReading"] = String(humidity);
+  readings.add(sensorReading);
 
   serializeJsonPretty(jsonDoc, jsonPayload);
 
