@@ -201,11 +201,24 @@ void onMessageReceived(int messageSize)
 {
   while (mqttClient.available()) 
   {
-    Serial.print((char)mqttClient.read());
     String payload = mqttClient.readString();
-    Serial.println(payload);
+    Logger.Info("Received commnd: " + payload);
+
+    if (payload == "RESET WIFI") {
+      resetWiFi();
+    }
+    else if (payload.startsWith("FREQUENCY")) {
+      int colonIndex = payload.indexOf(':');
+      String numberStr = payload.substring(colonIndex + 1);
+      numberStr.trim();
+      int frequency = numberStr.toInt();
+
+      if (frequency > 0) {
+        readingFrequencyInMinutes = frequency;
+      }
+    }
+    Logger.Info("Command has been processed.");
   }
-  Serial.println();
 }
 
 void setWiFiMode() {
@@ -708,35 +721,34 @@ static String getFormattedDateTime(unsigned long epochTimeInSeconds)
 static String mqttErrorCodeName(int errorCode) 
 {
   String errorMessage;
-  switch (errorCode) 
-  {
-  case MQTT_CONNECTION_REFUSED:
-    errorMessage = "MQTT_CONNECTION_REFUSED";
-    break;
-  case MQTT_CONNECTION_TIMEOUT:
-    errorMessage = "MQTT_CONNECTION_TIMEOUT";
-    break;
-  case MQTT_SUCCESS:
-    errorMessage = "MQTT_SUCCESS";
-    break;
-  case MQTT_UNACCEPTABLE_PROTOCOL_VERSION:
-    errorMessage = "MQTT_UNACCEPTABLE_PROTOCOL_VERSION";
-    break;
-  case MQTT_IDENTIFIER_REJECTED:
-    errorMessage = "MQTT_IDENTIFIER_REJECTED";
-    break;
-  case MQTT_SERVER_UNAVAILABLE:
-    errorMessage = "MQTT_SERVER_UNAVAILABLE";
-    break;
-  case MQTT_BAD_USER_NAME_OR_PASSWORD:
-    errorMessage = "MQTT_BAD_USER_NAME_OR_PASSWORD";
-    break;
-  case MQTT_NOT_AUTHORIZED:
-    errorMessage = "MQTT_NOT_AUTHORIZED";
-    break;
-  default:
-    errorMessage = "Unknown";
-    break;
+  switch (errorCode) {
+    case MQTT_CONNECTION_REFUSED:
+      errorMessage = "MQTT_CONNECTION_REFUSED";
+      break;
+    case MQTT_CONNECTION_TIMEOUT:
+      errorMessage = "MQTT_CONNECTION_TIMEOUT";
+      break;
+    case MQTT_SUCCESS:
+      errorMessage = "MQTT_SUCCESS";
+      break;
+    case MQTT_UNACCEPTABLE_PROTOCOL_VERSION:
+      errorMessage = "MQTT_UNACCEPTABLE_PROTOCOL_VERSION";
+      break;
+    case MQTT_IDENTIFIER_REJECTED:
+      errorMessage = "MQTT_IDENTIFIER_REJECTED";
+      break;
+    case MQTT_SERVER_UNAVAILABLE:
+      errorMessage = "MQTT_SERVER_UNAVAILABLE";
+      break;
+    case MQTT_BAD_USER_NAME_OR_PASSWORD:
+      errorMessage = "MQTT_BAD_USER_NAME_OR_PASSWORD";
+      break;
+    case MQTT_NOT_AUTHORIZED:
+      errorMessage = "MQTT_NOT_AUTHORIZED";
+      break;
+    default:
+      errorMessage = "Unknown";
+      break;
   }
 
   return errorMessage;
