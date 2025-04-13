@@ -51,6 +51,12 @@ struct WiFiNetwork {
   int32_t RSSI;
 };
 
+// Enum for commands
+enum CommandType {
+  ResetWiFi = 0,
+  SetFrequency = 1,
+};
+
 // WiFi and time client
 WiFiClient wifi;
 BearSSLClient bearSSLClient(wifi);
@@ -129,6 +135,9 @@ static unsigned long getTime();
 static String getFormattedDateTime(unsigned long epochTimeInSeconds);
 void setTime();
 
+// Helper function for enum
+String commandTypeToString(CommandType type);
+
 void restartBoard() {
   #if defined(ARDUINO_ARCH_SAM) || defined(ARDUINO_ARCH_SAMD) || defined(ARDUINO_ARCH_STM32)
     Logger.Info("Restarting the board...");
@@ -202,22 +211,48 @@ void onMessageReceived(int messageSize)
   while (mqttClient.available()) 
   {
     String payload = mqttClient.readString();
-    Logger.Info("Received commnd: " + payload);
 
-    if (payload == "RESET WIFI") {
-      resetWiFi();
+    JsonDocument command;
+    deserializeJson(command, payload);
+
+    int commandTypeInt = command["CommandType"];
+    int value = 0;
+
+    CommandType commandType = static_cast<CommandType>(commandTypeInt);
+    String commandTypeStr = commandTypeToString(commandType);
+
+    String valueStr;
+    if (command.containsKey("Value") && !command["Value"].isNull()) {
+      valueStr = command["Value"].as<String>();
+      value = command["Value"];
+    } else {
+      valueStr = "null";
     }
-    else if (payload.startsWith("FREQUENCY")) {
-      int colonIndex = payload.indexOf(':');
-      String numberStr = payload.substring(colonIndex + 1);
-      numberStr.trim();
-      int frequency = numberStr.toInt();
 
-      if (frequency > 0) {
-        readingFrequencyInMinutes = frequency;
-      }
+    Logger.Info("Received command " + commandTypeStr + " with value: " + valueStr);
+
+    switch (commandType)
+    {
+      case ResetWiFi:
+        resetWiFi();
+        break;
+      case SetFrequency:
+        if (value > 0) {
+          readingFrequencyInMinutes = value;
+        }
+        break;
+      default:
+        break;
     }
     Logger.Info("Command has been processed.");
+  }
+}
+
+String commandTypeToString(CommandType type) {
+  switch (type) {
+    case ResetWiFi:    return "ResetWiFi";
+    case SetFrequency: return "SetFrequency";
+    default:           return "Unknown";
   }
 }
 
